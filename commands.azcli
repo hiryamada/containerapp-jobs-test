@@ -1,0 +1,65 @@
+name=test$(date|md5sum|head -c6)
+location=japaneast
+
+az group create -n $name -l $location
+
+# az storage account create -n $name -g $name -l $location --sku Standard_LRS
+# az storage container create --account-name $name -n input
+
+wid=$(az monitor log-analytics workspace create -g $name --workspace-name $name --query customerId -otsv)
+wkey=$(az monitor log-analytics workspace get-shared-keys -g $name -n $name --query primarySharedKey -otsv)
+
+az containerapp env create -n $name -g $name -l $location \
+--logs-workspace-id $wid --logs-workspace-key $wkey
+
+az acr create -n $name -g $name -l $location --sku Basic
+
+az acr build -r $name -t testapp:v1 .
+
+# システム割り当てマネージドIDを使用してPullする
+# 事前のロール割り当ては不要。
+
+az containerapp job create -n $name -g $name --environment $name \
+--image "$name.azurecr.io/testapp:v1" \
+--replica-timeout 60 \
+--replica-retry-limit 1 \
+--trigger-type Manual \
+--parallelism 1 \
+--replica-completion-count 1 \
+--registry-identity system \
+--registry-server "$name.azurecr.io"
+
+# ■ユーザー割り当てマネージドIDを使用してPullする
+# az identity create -n $name -g $name -l $location
+
+# az role assignment create \
+# --scope `az acr show -n $name --query id -otsv` \
+# --role acrpull \
+# --assignee `az identity show -n $name -g $name --query principalId -otsv`
+
+# az containerapp job create -n $name -g $name --environment $name \
+# --image "$name.azurecr.io/testapp:v1" \
+# --replica-timeout 60 \
+# --replica-retry-limit 1 \
+# --trigger-type Manual \
+# --parallelism 1 \
+# --replica-completion-count 1 \
+# --registry-identity `az identity show -n $name -g $name --query id -otsv` \
+# --registry-server "$name.azurecr.io"
+
+# ジョブを開始
+# ジョブ実行名を取得
+# --argsが渡されない？？
+exname=$(az containerapp job start --args "--name" "taro" -n $name -g $name --query name -otsv  )
+
+#az containerapp job execution show -n $name -g $name --job-execution-name $exname
+
+# ジョブ実行名を指定してログを取り出すクエリ
+query="ContainerAppConsoleLogs_CL
+|where ContainerGroupName_s startswith '$exname'
+|sort by _timestamp_d asc
+|project Log_s"
+
+# Log Analyticsワークスペースでクエリを実行
+az monitor log-analytics query -w $wid \
+--analytics-query "$query" -otable
